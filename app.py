@@ -32,7 +32,7 @@ SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJ
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # DonationAlerts токен
-DA_TOKEN = "your_donation_alerts_token"  # Замените на ваш токен
+DA_TOKEN = "6q26Pn5jJN7iWFuL3SPf"  # Замените на ваш токен
 
 # Инициализация WebSocket для DonationAlerts
 def init_donation_alerts():
