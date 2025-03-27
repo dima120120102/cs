@@ -39,7 +39,7 @@ except Exception as e:
     raise
 
 # DonationAlerts токен
-DA_TOKEN = "6q26Pn5jJN7iWFuL3SPf"  # Замените на ваш токен
+DA_TOKEN = "6q26Pn5jJN7iWFuL3SPf"
 
 # Инициализация WebSocket для DonationAlerts
 def init_donation_alerts():
