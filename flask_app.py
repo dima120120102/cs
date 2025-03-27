@@ -21,14 +21,12 @@ def login():
     params = {
         'openid.ns': 'http://specs.openid.net/auth/2.0',
         'openid.mode': 'checkid_setup',
-        'openid.return_to': 'https://dimahacker3000krut.pythonanywhere.com/auth',
-        'openid.realm': 'https://dimahacker3000krut.pythonanywhere.com',
+        'openid.return_to': 'https://cs2cases.onrender.com/auth',
+        'openid.realm': 'https://cs2cases.onrender.com',
         'openid.identity': 'http://specs.openid.net/auth/2.0/identifier_select',
         'openid.claimed_id': 'http://specs.openid.net/auth/2.0/identifier_select',
     }
     redirect_url = f"{steam_login_url}?{urlencode(params)}"
-    with open('/home/dimahacker3000krut/app.log', 'a') as f:
-        f.write(f"Запрос на /login получен\nRedirect URI: {redirect_url}\n")
     return redirect(redirect_url)
 
 @app.route('/auth')
