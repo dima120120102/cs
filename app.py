@@ -24,7 +24,7 @@ app = Flask(__name__)
 socketio = SocketIO(app, async_mode='gevent', cors_allowed_origins="*")
 
 # Настройка CORS
-CORS(app, resources={r"/api/*": {"origins": "http://cs2cases.ru"}})  # Обновляем для cs2cases.ru
+CORS(app, resources={r"/api/*": {"origins": "https://cq34195.tw1.ru"}})
 
 # Supabase конфигурация
 SUPABASE_URL = "https://gxeviitquermnukavhvj.supabase.co"
@@ -39,7 +39,7 @@ except Exception as e:
     raise
 
 # DonationAlerts токен
-DA_TOKEN = "6q26Pn5jJN7iWFuL3SPf"
+DA_TOKEN = "6q26Pn5jJN7iWFuL3SPf"  # Замените на ваш токен
 
 # Инициализация WebSocket для DonationAlerts
 def init_donation_alerts():
@@ -103,8 +103,8 @@ def login():
         params = {
             'openid.ns': 'http://specs.openid.net/auth/2.0',
             'openid.mode': 'checkid_setup',
-            'openid.return_to': 'https://cs2cases.ru/auth',  # Обновляем для cs2cases.ru
-            'openid.realm': 'https://cs2cases.ru',  # Обновляем для cs2cases.ru
+            'openid.return_to': 'https://cs2cases.onrender.com/auth',
+            'openid.realm': 'https://cs2cases.onrender.com',
             'openid.identity': 'http://specs.openid.net/auth/2.0/identifier_select',
             'openid.claimed_id': 'http://specs.openid.net/auth/2.0/identifier_select',
         }
@@ -140,7 +140,7 @@ def auth():
                 }).execute()
                 logging.info(f"Новый пользователь добавлен: {steam_id}")
             
-            redirect_url = f'http://cs2cases.ru/?steamid={steam_id}&username={user_name}'  # Обновляем для cs2cases.ru
+            redirect_url = f'https://cq34195.tw1.ru/?steamid={steam_id}&username={user_name}'
             logging.info(f"Перенаправление на: {redirect_url}")
             return redirect(redirect_url)
         else:
