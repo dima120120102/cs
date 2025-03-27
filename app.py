@@ -29,7 +29,7 @@ SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJ
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # DonationAlerts токен
-DA_TOKEN = "6q26Pn5jJN7iWFuL3SPf"  # Замените на ваш токен
+DA_TOKEN = "your_donation_alerts_token"  # Замените на ваш токен
 
 # Инициализация WebSocket для DonationAlerts
 def init_donation_alerts():
@@ -40,29 +40,46 @@ def init_donation_alerts():
 
     @socketio.on('donation')
     def on_donation(data):
-        donation = json.loads(data)
-        logging.info(f"Новый донат: {donation}")
+        try:
+            donation = json.loads(data)
+            logging.info(f"Новый донат: {donation}")
 
-        # Предполагаем, что SteamID указан в имени доната
-        steam_id = donation.get('username')
-        amount = float(donation['amount'])
-        currency = donation['currency']
+            # Предполагаем, что SteamID указан в имени доната
+            steam_id = donation.get('username')
+            if not steam_id:
+                logging.warning("SteamID не указан в имени доната")
+                return
 
-        # Конвертация в рубли, если не RUB
-        amount_in_rub = amount
-        if currency != 'RUB':
-            rates = {'USD': 90, 'EUR': 100}  # Примерные курсы, замените на реальные
-            amount_in_rub = amount * rates.get(currency, 1)
+            amount = float(donation['amount'])
+            currency = donation['currency']
 
-        # Обновляем баланс в Supabase
-        response = supabase.table('users').select('balance').eq('steam_id', steam_id).execute()
-        if response.data:
-            new_balance = response.data[0]['balance'] + amount_in_rub
-            supabase.table('users').update({'balance': new_balance}).eq('steam_id', steam_id).execute()
-            logging.info(f"Баланс обновлен для {steam_id}: {new_balance}")
-            
-            # Уведомляем фронтенд через SocketIO
-            socketio.emit('balance_update', {'steam_id': steam_id, 'balance': new_balance})
+            # Конвертация в рубли, если не RUB
+            amount_in_rub = amount
+            if currency != 'RUB':
+                rates = {'USD': 90, 'EUR': 100}  # Примерные курсы, замените на реальные
+                amount_in_rub = amount * rates.get(currency, 1)
+
+            # Обновляем баланс в Supabase
+            response = supabase.table('users').select('balance').eq('steam_id', steam_id).execute()
+            if response.data:
+                new_balance = response.data[0]['balance'] + amount_in_rub
+                supabase.table('users').update({'balance': new_balance}).eq('steam_id', steam_id).execute()
+                logging.info(f"Баланс обновлен для {steam_id}: {new_balance}")
+                
+                # Уведомляем фронтенд через SocketIO
+                socketio.emit('balance_update', {'steam_id': steam_id, 'balance': new_balance})
+            else:
+                logging.warning(f"Пользователь с SteamID {steam_id} не найден в базе")
+        except Exception as e:
+            logging.error(f"Ошибка при обработке доната: {str(e)}")
+
+    @socketio.on('error')
+    def on_error(error):
+        logging.error(f"Ошибка WebSocket DonationAlerts: {error}")
+
+    @socketio.on('disconnect')
+    def on_disconnect():
+        logging.info("Отключено от DonationAlerts")
 
 @app.route('/test')
 def test():
@@ -196,5 +213,8 @@ def send_to_steam():
 if __name__ == '__main__':
     init_donation_alerts()  # Запускаем DonationAlerts WebSocket
     # Для локального запуска используем socketio.run
-    # В продакшене Render будет использовать gunicorn
-    socketio.run(app, host='0.0.0.0', port=int(os.environ.get('PORT', 8000)))
+    if os.environ.get('FLASK_ENV') == 'development':
+        socketio.run(app, host='0.0.0.0', port=int(os.environ.get('PORT', 8000)))
+    else:
+        # В продакшене Render будет использовать gunicorn
+        logging.info("Запуск через gunicorn в продакшене")
