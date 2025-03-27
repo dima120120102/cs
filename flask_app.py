@@ -13,8 +13,6 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 @app.route('/test')
 def test():
-    with open('/home/dimahacker3000krut/app.log', 'a') as f:
-        f.write("Маршрут /test вызван\n")
     return "Сервер работает!"
 
 @app.route('/login')
