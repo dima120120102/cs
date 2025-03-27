@@ -29,7 +29,14 @@ CORS(app, resources={r"/api/*": {"origins": "https://cq34195.tw1.ru"}})
 # Supabase конфигурация
 SUPABASE_URL = "https://gxeviitquermnukavhvj.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd4ZXZpaXRxdWVybW51a2F2aHZqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDI4MjY5NjgsImV4cCI6MjA1ODQwMjk2OH0.FOZnKiCzhL1UPVzOttN4RhFtrkplamHho6flpibdCx8"
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# Инициализация Supabase клиента с обработкой ошибок
+try:
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    logging.info("Supabase клиент успешно инициализирован")
+except Exception as e:
+    logging.error(f"Ошибка инициализации Supabase клиента: {str(e)}")
+    raise
 
 # DonationAlerts токен
 DA_TOKEN = "6q26Pn5jJN7iWFuL3SPf"  # Замените на ваш токен
