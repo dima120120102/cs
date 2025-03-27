@@ -5,6 +5,7 @@ import logging
 from urllib.parse import urlencode, parse_qs, urlparse
 from flask import Flask, redirect, request, jsonify, Response
 from flask_cors import CORS
+from flask_socketio import SocketIO
 from supabase import create_client, Client
 
 # Настройка логирования
@@ -12,12 +13,52 @@ logging.basicConfig(level=logging.INFO)
 
 app = Flask(__name__)
 
-# Настройка CORS для разрешения запросов с твоего сайта
+# Настройка SocketIO
+socketio = SocketIO(app, cors_allowed_origins="*")
+
+# Настройка CORS
 CORS(app, resources={r"/api/*": {"origins": "https://cq34195.tw1.ru"}})
 
+# Supabase конфигурация
 SUPABASE_URL = "https://gxeviitquermnukavhvj.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd4ZXZpaXRxdWVybW51a2F2aHZqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDI4MjY5NjgsImV4cCI6MjA1ODQwMjk2OH0.FOZnKiCzhL1UPVzOttN4RhFtrkplamHho6flpibdCx8"
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# DonationAlerts токен
+DA_TOKEN = "6q26Pn5jJN7iWFuL3SPf"  # Замените на ваш токен из DonationAlerts
+
+# Инициализация WebSocket для DonationAlerts
+def init_donation_alerts():
+    @socketio.on('connect')
+    def on_connect():
+        logging.info("Подключено к DonationAlerts")
+        socketio.emit('add-user', {'token': DA_TOKEN, 'type': 'minor'})
+
+    @socketio.on('donation')
+    def on_donation(data):
+        donation = json.loads(data)
+        logging.info(f"Новый донат: {donation}")
+
+        # Предполагаем, что SteamID указан в имени доната
+        steam_id = donation.get('username')
+        amount = float(donation['amount'])
+        currency = donation['currency']
+
+        # Конвертация в рубли, если не RUB
+        amount_in_rub = amount
+        if currency != 'RUB':
+            rates = {'USD': 90, 'EUR': 100}  # Примерные курсы, замените на реальные
+            amount_in_rub = amount * rates.get(currency, 1)
+
+        # Обновляем баланс в Supabase
+        response = supabase.table('users').select('balance').eq('steam_id', steam_id).execute()
+        if response.data:
+            new_balance = response.data[0]['balance'] + amount_in_rub
+            supabase.table('users').update({'balance': new_balance}).eq('steam_id', steam_id).execute()
+            logging.info(f"Баланс обновлен для {steam_id}: {new_balance}")
+            
+            # Уведомляем фронтенд через SocketIO
+            socketio.emit('balance_update', {'steam_id': steam_id, 'balance': new_balance})
 
 @app.route('/test')
 def test():
@@ -37,7 +78,7 @@ def login():
             'openid.claimed_id': 'http://specs.openid.net/auth/2.0/identifier_select',
         }
         redirect_url = f"{steam_login_url}?{urlencode(params)}"
-        logging.info(f"Запрос на /login получен, Redirect URI: {redirect_url}")
+        logging.info(f"Redirect URI: {redirect_url}")
         return redirect(redirect_url)
     except Exception as e:
         logging.error(f"Ошибка в /login: {str(e)}")
@@ -56,9 +97,8 @@ def auth():
         if 'is_valid:true' in response.text:
             steam_id = params['openid.claimed_id'][0].split('/')[-1]
             user_name = f"User_{steam_id[-4:]}"
-            logging.info(f"Авторизация успешна, Steam ID: {steam_id}, Username: {user_name}")
+            logging.info(f"Авторизация успешна, Steam ID: {steam_id}")
             
-            # Проверяем, есть ли пользователь в Supabase
             response = supabase.table('users').select('*').eq('steam_id', steam_id).execute()
             if not response.data:
                 supabase.table('users').insert({
@@ -67,9 +107,8 @@ def auth():
                     'inventory': [],
                     'sales_history': []
                 }).execute()
-                logging.info(f"Новый пользователь добавлен в Supabase: {steam_id}")
+                logging.info(f"Новый пользователь добавлен: {steam_id}")
             
-            # Перенаправляем на твой сайт с параметрами
             redirect_url = f'https://cq34195.tw1.ru/?steamid={steam_id}&username={user_name}'
             logging.info(f"Перенаправление на: {redirect_url}")
             return redirect(redirect_url)
@@ -96,10 +135,10 @@ def get_user():
                 'inventory': user.get('inventory', []),
                 'sales_history': user.get('sales_history', [])
             }
-            logging.info(f"Данные пользователя для steam_id {steam_id}: {user_data}")
+            logging.info(f"Данные пользователя для {steam_id}: {user_data}")
             return jsonify(user_data)
         else:
-            logging.warning(f"Пользователь не найден для steam_id {steam_id}")
+            logging.warning(f"Пользователь не найден: {steam_id}")
             return "User not found", 404
     except Exception as e:
         logging.error(f"Ошибка в /api/user: {str(e)}")
@@ -124,9 +163,9 @@ def update_user():
         
         if update_data:
             supabase.table('users').update(update_data).eq('steam_id', steam_id).execute()
-            logging.info(f"Данные пользователя обновлены для steam_id {steam_id}: {update_data}")
+            logging.info(f"Данные обновлены для {steam_id}: {update_data}")
         else:
-            logging.warning("Нет данных для обновления в /api/user/update")
+            logging.warning("Нет данных для обновления")
         
         return "User updated", 200
     except Exception as e:
@@ -144,11 +183,12 @@ def send_to_steam():
             logging.error("Missing required fields in /api/send-to-steam")
             return "Missing required fields", 400
         
-        logging.info(f"Отправка предмета {item['name']} пользователю {steam_id} через Trade URL: {trade_url}")
+        logging.info(f"Отправка предмета {item['name']} для {steam_id}")
         return "Trade offer sent (placeholder)", 200
     except Exception as e:
         logging.error(f"Ошибка в /api/send-to-steam: {str(e)}")
         return f"Ошибка: {str(e)}", 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8000)))
+    init_donation_alerts()  # Запускаем DonationAlerts WebSocket
+    socketio.run(app, host='0.0.0.0', port=int(os.environ.get('PORT', 8000)))
