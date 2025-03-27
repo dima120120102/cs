@@ -1,24 +1,27 @@
 import os
 import json
 import logging
+import gevent
+from gevent import monkey
+
+# Применяем патч для поддержки асинхронных операций (ДО импорта других модулей)
+monkey.patch_all()
+
+# Теперь импортируем остальные модули
 from urllib.parse import urlencode, parse_qs, urlparse
 from flask import Flask, redirect, request, jsonify, Response
 from flask_cors import CORS
 from flask_socketio import SocketIO
 from supabase import create_client, Client
-import eventlet
 import requests
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 
-# Применяем патч для поддержки асинхронных операций
-eventlet.monkey_patch()
-
 app = Flask(__name__)
 
-# Настройка SocketIO с eventlet
-socketio = SocketIO(app, async_mode='eventlet', cors_allowed_origins="*")
+# Настройка SocketIO с gevent
+socketio = SocketIO(app, async_mode='gevent', cors_allowed_origins="*")
 
 # Настройка CORS
 CORS(app, resources={r"/api/*": {"origins": "https://cq34195.tw1.ru"}})
