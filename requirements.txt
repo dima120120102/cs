@@ -5,3 +5,4 @@ gevent==24.2.1
 requests==2.31.0
 supabase==2.7.1
 psycopg2-binary==2.9.9
+gunicorn==22.0.0
