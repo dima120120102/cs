@@ -1,11 +1,6 @@
-flask==2.3.2
-flask-socketio==5.3.6
-requests==2.31.0
-supabase==2.7.1
-gotrue==2.7.0
-postgrest==0.16.1
-realtime==2.0.1
-httpx==0.25.2  # Понижаем версию до 0.25.2
-flask-cors==4.0.0
-gunicorn==22.0.0
-gevent==24.2.1
+flask
+flask-cors
+flask-socketio
+gevent
+requests
+supabase>=2.0.0
