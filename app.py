@@ -4,10 +4,9 @@ import logging
 import gevent
 from gevent import monkey
 
-# Применяем патч для поддержки асинхронных операций (ДО импорта других модулей)
+# Применяем патч для поддержки асинхронных операций
 monkey.patch_all()
 
-# Теперь импортируем остальные модули
 from urllib.parse import urlencode, parse_qs, urlparse
 from flask import Flask, redirect, request, jsonify, Response
 from flask_cors import CORS
@@ -222,9 +221,7 @@ def send_to_steam():
 
 if __name__ == '__main__':
     init_donation_alerts()  # Запускаем DonationAlerts WebSocket
-    # Для локального запуска используем socketio.run
     if os.environ.get('FLASK_ENV') == 'development':
         socketio.run(app, host='0.0.0.0', port=int(os.environ.get('PORT', 8000)))
     else:
-        # В продакшене Render будет использовать gunicorn
         logging.info("Запуск через gunicorn в продакшене")
