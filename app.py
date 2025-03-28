@@ -33,6 +33,25 @@ DA_WS_URL = "wss://socket.donationalerts.ru:443"
 # Переменная для хранения access_token
 access_token = None
 
+# Функция для сохранения refresh_token в Supabase
+def save_refresh_token(refresh_token):
+    # Проверяем, есть ли уже запись
+    response = supabase.table('tokens').select('*').eq('id', 1).execute()
+    if response.data:
+        # Обновляем существующую запись
+        supabase.table('tokens').update({'refresh_token': refresh_token}).eq('id', 1).execute()
+    else:
+        # Создаём новую запись
+        supabase.table('tokens').insert({'id': 1, 'refresh_token': refresh_token}).execute()
+    logging.info("refresh_token сохранён в Supabase")
+
+# Функция для получения refresh_token из Supabase
+def get_refresh_token():
+    response = supabase.table('tokens').select('refresh_token').eq('id', 1).execute()
+    if response.data:
+        return response.data[0]['refresh_token']
+    return None
+
 # Маршрут для начала авторизации
 @app.route('/oauth/login')
 def oauth_login():
@@ -40,50 +59,74 @@ def oauth_login():
         f"{DA_AUTH_URL}?client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}"
         "&response_type=code&scope=oauth-donation-index oauth-user-show"
     )
+    logging.info(f"Перенаправление на авторизацию: {auth_url}")
     return redirect(auth_url)
 
 # Маршрут для обработки callback после авторизации
 @app.route('/oauth/callback')
 def oauth_callback():
     global access_token
-    code = request.args.get('code')
-    if not code:
-        return "Ошибка: код авторизации не получен", 400
+    try:
+        # Проверяем наличие параметра code
+        code = request.args.get('code')
+        if not code:
+            logging.error("Параметр 'code' отсутствует в запросе")
+            return "Ошибка: код авторизации не получен", 400
 
-    # Обмен кода на access_token
-    token_data = {
-        "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
-        "grant_type": "authorization_code",
-        "code": code,
-        "redirect_uri": REDIRECT_URI
-    }
-    response = requests.post(DA_TOKEN_URL, data=token_data)
-    if response.status_code != 200:
-        logging.error(f"Ошибка получения токена: {response.text}")
-        return "Ошибка получения токена", 500
+        logging.info(f"Получен код авторизации: {code}")
 
-    token_response = response.json()
-    access_token = token_response.get("access_token")
-    refresh_token = token_response.get("refresh_token")
-    logging.info(f"Получен access_token: {access_token}")
+        # Обмен кода на access_token
+        token_data = {
+            "client_id": CLIENT_ID,
+            "client_secret": CLIENT_SECRET,
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": REDIRECT_URI
+        }
+        logging.info(f"Отправка запроса на {DA_TOKEN_URL} с данными: {token_data}")
+        response = requests.post(DA_TOKEN_URL, data=token_data)
+        
+        if response.status_code != 200:
+            logging.error(f"Ошибка получения токена: {response.status_code} - {response.text}")
+            return "Ошибка получения токена", 500
 
-    # Сохраните refresh_token для обновления access_token в будущем
-    with open("refresh_token.txt", "w") as f:
-        f.write(refresh_token)
+        # Парсим ответ
+        try:
+            token_response = response.json()
+        except ValueError as e:
+            logging.error(f"Ошибка парсинга JSON ответа: {str(e)}")
+            return "Ошибка: некорректный JSON в ответе от DonationAlerts", 500
 
-    # Инициируем WebSocket-соединение
-    init_donation_alerts()
-    return "Авторизация успешна. Теперь сервер может получать донаты."
+        access_token = token_response.get("access_token")
+        refresh_token = token_response.get("refresh_token")
+
+        if not access_token or not refresh_token:
+            logging.error(f"access_token или refresh_token отсутствуют в ответе: {token_response}")
+            return "Ошибка: токены не получены", 500
+
+        logging.info(f"Получен access_token: {access_token}")
+
+        # Сохраняем refresh_token в Supabase
+        try:
+            save_refresh_token(refresh_token)
+        except Exception as e:
+            logging.error(f"Ошибка сохранения refresh_token в Supabase: {str(e)}")
+            return "Ошибка сохранения refresh_token", 500
+
+        # Инициируем WebSocket-соединение
+        init_donation_alerts()
+        return "Авторизация успешна. Теперь сервер может получать донаты."
+
+    except Exception as e:
+        logging.error(f"Необработанная ошибка в /oauth/callback: {str(e)}")
+        return f"Произошла ошибка: {str(e)}", 500
 
 # Функция для обновления access_token с помощью refresh_token
 def refresh_access_token():
     global access_token
-    try:
-        with open("refresh_token.txt", "r") as f:
-            refresh_token = f.read().strip()
-    except FileNotFoundError:
-        logging.error("refresh_token не найден")
+    refresh_token = get_refresh_token()
+    if not refresh_token:
+        logging.error("refresh_token не найден в Supabase")
         return False
 
     token_data = {
@@ -102,9 +145,8 @@ def refresh_access_token():
     new_refresh_token = token_response.get("refresh_token")
     logging.info(f"Токен обновлен: {access_token}")
 
-    # Обновляем refresh_token
-    with open("refresh_token.txt", "w") as f:
-        f.write(new_refresh_token)
+    # Обновляем refresh_token в Supabase
+    save_refresh_token(new_refresh_token)
     return True
 
 # Инициализация WebSocket-соединения с DonationAlerts
@@ -155,6 +197,9 @@ def init_donation_alerts():
     @socketio.on('disconnect')
     def on_disconnect():
         logging.info("Отключено от DonationAlerts")
+
+    # Запускаем фоновую задачу для опроса донатов
+    Thread(target=poll_donations, daemon=True).start()
 
 # Резервный способ опроса донатов через API
 def poll_donations():
@@ -215,9 +260,6 @@ def get_user():
         return user_data, 200
     else:
         return {"error": "Пользователь не найден"}, 404
-
-# Запускаем фоновую задачу для опроса донатов
-Thread(target=poll_donations, daemon=True).start()
 
 # Запуск приложения
 if __name__ == "__main__":
