@@ -1,81 +1,147 @@
 import os
-import json
 import logging
-import gevent
-from gevent import monkey
-
-# Применяем патч для поддержки асинхронных операций
-monkey.patch_all()
-
-from urllib.parse import urlencode, parse_qs, urlparse
-from flask import Flask, redirect, request, jsonify, Response
-from flask_cors import CORS
+import json
+import requests
+from flask import Flask, request, redirect, url_for
 from flask_socketio import SocketIO
 from supabase import create_client, Client
-import requests
+from threading import Thread
+import time
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 
+# Инициализация Flask и SocketIO
 app = Flask(__name__)
+app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY', 'a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0u1v2w3x4y5z6')
+socketio = SocketIO(app, cors_allowed_origins="https://cq34195.tw1.ru", logger=True, engineio_logger=True)
 
-# Настройка SocketIO с gevent
-socketio = SocketIO(app, async_mode='gevent', cors_allowed_origins="*")
-
-# Настройка CORS
-CORS(app, resources={r"/api/*": {"origins": "https://cq34195.tw1.ru"}})
-
-# Supabase конфигурация
+# Инициализация Supabase
 SUPABASE_URL = "https://gxeviitquermnukavhvj.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd4ZXZpaXRxdWVybW51a2F2aHZqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDI4MjY5NjgsImV4cCI6MjA1ODQwMjk2OH0.FOZnKiCzhL1UPVzOttN4RhFtrkplamHho6flpibdCx8"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd4ZXZpaXRxdWVybW51a2F2aHZqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Mjg5OTU5MDcsImV4cCI6MjA0NDU3MTkwN30.-I6lWJwDi6zTzzXh0gT6W2iM7nW9K2x2L2x2L2x2L2w"
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+logging.info("Supabase клиент успешно инициализирован")
 
-# Инициализация Supabase клиента с обработкой ошибок
-try:
-    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-    logging.info("Supabase клиент успешно инициализирован")
-except Exception as e:
-    logging.error(f"Ошибка инициализации Supabase клиента: {str(e)}")
-    raise
+# Настройки DonationAlerts OAuth
+CLIENT_ID = "14690"  # Замените на ваш client_id
+CLIENT_SECRET = "YIJUslJ5md0wvPfQK8D0dIop3faLh54dWCAcoWZB"  # Замените на ваш client_secret
+REDIRECT_URI = "https://cs2cases.onrender.com/oauth/callback"
+DA_AUTH_URL = "https://www.donationalerts.com/oauth/authorize"
+DA_TOKEN_URL = "https://www.donationalerts.com/oauth/token"
+DA_WS_URL = "wss://socket.donationalerts.ru:443"
 
-# DonationAlerts токен
-DA_TOKEN = "6q26Pn5jJN7iWFuL3SPf"
+# Переменная для хранения access_token
+access_token = None
 
-# Инициализация WebSocket для DonationAlerts
+# Маршрут для начала авторизации
+@app.route('/oauth/login')
+def oauth_login():
+    auth_url = (
+        f"{DA_AUTH_URL}?client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}"
+        "&response_type=code&scope=oauth-donation-index oauth-user-show"
+    )
+    return redirect(auth_url)
+
+# Маршрут для обработки callback после авторизации
+@app.route('/oauth/callback')
+def oauth_callback():
+    global access_token
+    code = request.args.get('code')
+    if not code:
+        return "Ошибка: код авторизации не получен", 400
+
+    # Обмен кода на access_token
+    token_data = {
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": REDIRECT_URI
+    }
+    response = requests.post(DA_TOKEN_URL, data=token_data)
+    if response.status_code != 200:
+        logging.error(f"Ошибка получения токена: {response.text}")
+        return "Ошибка получения токена", 500
+
+    token_response = response.json()
+    access_token = token_response.get("access_token")
+    refresh_token = token_response.get("refresh_token")
+    logging.info(f"Получен access_token: {access_token}")
+
+    # Сохраните refresh_token для обновления access_token в будущем
+    with open("refresh_token.txt", "w") as f:
+        f.write(refresh_token)
+
+    # Инициируем WebSocket-соединение
+    init_donation_alerts()
+    return "Авторизация успешна. Теперь сервер может получать донаты."
+
+# Функция для обновления access_token с помощью refresh_token
+def refresh_access_token():
+    global access_token
+    try:
+        with open("refresh_token.txt", "r") as f:
+            refresh_token = f.read().strip()
+    except FileNotFoundError:
+        logging.error("refresh_token не найден")
+        return False
+
+    token_data = {
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token
+    }
+    response = requests.post(DA_TOKEN_URL, data=token_data)
+    if response.status_code != 200:
+        logging.error(f"Ошибка обновления токена: {response.text}")
+        return False
+
+    token_response = response.json()
+    access_token = token_response.get("access_token")
+    new_refresh_token = token_response.get("refresh_token")
+    logging.info(f"Токен обновлен: {access_token}")
+
+    # Обновляем refresh_token
+    with open("refresh_token.txt", "w") as f:
+        f.write(new_refresh_token)
+    return True
+
+# Инициализация WebSocket-соединения с DonationAlerts
 def init_donation_alerts():
+    if not access_token:
+        logging.error("access_token не установлен")
+        return
+
     @socketio.on('connect')
     def on_connect():
         logging.info("Подключено к DonationAlerts")
-        socketio.emit('add-user', {'token': DA_TOKEN, 'type': 'minor'})
+        socketio.emit('add-user', {'token': access_token, 'type': 'minor'})
 
     @socketio.on('donation')
     def on_donation(data):
         try:
             donation = json.loads(data)
             logging.info(f"Новый донат: {donation}")
-
-            # Предполагаем, что SteamID указан в имени доната
+            
             steam_id = donation.get('username')
             if not steam_id:
                 logging.warning("SteamID не указан в имени доната")
                 return
-
+            
             amount = float(donation['amount'])
             currency = donation['currency']
-
-            # Конвертация в рубли, если не RUB
             amount_in_rub = amount
             if currency != 'RUB':
-                rates = {'USD': 90, 'EUR': 100}  # Примерные курсы, замените на реальные
+                rates = {'USD': 90, 'EUR': 100}
                 amount_in_rub = amount * rates.get(currency, 1)
+                logging.info(f"Конвертация: {amount} {currency} -> {amount_in_rub} RUB")
 
-            # Обновляем баланс в Supabase
             response = supabase.table('users').select('balance').eq('steam_id', steam_id).execute()
             if response.data:
                 new_balance = response.data[0]['balance'] + amount_in_rub
                 supabase.table('users').update({'balance': new_balance}).eq('steam_id', steam_id).execute()
                 logging.info(f"Баланс обновлен для {steam_id}: {new_balance}")
-                
-                # Уведомляем фронтенд через SocketIO
                 socketio.emit('balance_update', {'steam_id': steam_id, 'balance': new_balance})
             else:
                 logging.warning(f"Пользователь с SteamID {steam_id} не найден в базе")
@@ -84,144 +150,75 @@ def init_donation_alerts():
 
     @socketio.on('error')
     def on_error(error):
-        logging.error(f"Ошибка WebSocket DonationAlerts: {error}")
+        logging.error(f"Ошибка SocketIO: {error}")
 
     @socketio.on('disconnect')
     def on_disconnect():
         logging.info("Отключено от DonationAlerts")
 
-@app.route('/test')
-def test():
-    logging.info("Маршрут /test вызван")
-    return "Сервер работает!"
+# Резервный способ опроса донатов через API
+def poll_donations():
+    global access_token
+    while True:
+        try:
+            if not access_token:
+                logging.error("access_token не установлен для опроса донатов")
+                time.sleep(300)
+                continue
 
-@app.route('/login')
-def login():
-    try:
-        steam_login_url = 'https://steamcommunity.com/openid/login'
-        params = {
-            'openid.ns': 'http://specs.openid.net/auth/2.0',
-            'openid.mode': 'checkid_setup',
-            'openid.return_to': 'https://cs2cases.onrender.com/auth',
-            'openid.realm': 'https://cs2cases.onrender.com',
-            'openid.identity': 'http://specs.openid.net/auth/2.0/identifier_select',
-            'openid.claimed_id': 'http://specs.openid.net/auth/2.0/identifier_select',
-        }
-        redirect_url = f"{steam_login_url}?{urlencode(params)}"
-        logging.info(f"Redirect URI: {redirect_url}")
-        return redirect(redirect_url)
-    except Exception as e:
-        logging.error(f"Ошибка в /login: {str(e)}")
-        return f"Ошибка: {str(e)}", 500
+            headers = {'Authorization': f'Bearer {access_token}'}
+            response = requests.get('https://www.donationalerts.com/api/v1/alerts/donations', headers=headers)
+            if response.status_code == 401:  # Токен истёк
+                if refresh_access_token():
+                    continue
+                else:
+                    time.sleep(300)
+                    continue
 
-@app.route('/auth')
-def auth():
-    try:
-        query = urlparse(request.url).query
-        params = parse_qs(query)
-        params['openid.mode'] = 'check_authentication'
-        
-        response = requests.get('https://steamcommunity.com/openid/login', params=params)
-        logging.info(f"Ответ от Steam: {response.text}")
-        
-        if 'is_valid:true' in response.text:
-            steam_id = params['openid.claimed_id'][0].split('/')[-1]
-            user_name = f"User_{steam_id[-4:]}"
-            logging.info(f"Авторизация успешна, Steam ID: {steam_id}")
+            response.raise_for_status()
+            donations = response.json().get('data', [])
             
-            response = supabase.table('users').select('*').eq('steam_id', steam_id).execute()
-            if not response.data:
-                supabase.table('users').insert({
-                    'steam_id': steam_id,
-                    'balance': 0,
-                    'inventory': [],
-                    'sales_history': []
-                }).execute()
-                logging.info(f"Новый пользователь добавлен: {steam_id}")
-            
-            redirect_url = f'https://cq34195.tw1.ru/?steamid={steam_id}&username={user_name}'
-            logging.info(f"Перенаправление на: {redirect_url}")
-            return redirect(redirect_url)
-        else:
-            logging.warning("Не удалось авторизоваться через Steam")
-            return "Authentication failed", 400
-    except Exception as e:
-        logging.error(f"Ошибка в /auth: {str(e)}")
-        return f"Ошибка: {str(e)}", 500
+            for donation in donations:
+                steam_id = donation.get('username')
+                if not steam_id:
+                    logging.warning("SteamID не указан в имени доната (API)")
+                    continue
+                
+                amount = float(donation['amount'])
+                currency = donation['currency']
+                amount_in_rub = amount
+                if currency != 'RUB':
+                    rates = {'USD': 90, 'EUR': 100}
+                    amount_in_rub = amount * rates.get(currency, 1)
 
-@app.route('/api/user')
+                response = supabase.table('users').select('balance').eq('steam_id', steam_id).execute()
+                if response.data:
+                    new_balance = response.data[0]['balance'] + amount_in_rub
+                    supabase.table('users').update({'balance': new_balance}).eq('steam_id', steam_id).execute()
+                    logging.info(f"Баланс обновлен для {steam_id} (API): {new_balance}")
+                    socketio.emit('balance_update', {'steam_id': steam_id, 'balance': new_balance})
+        except Exception as e:
+            logging.error(f"Ошибка при опросе донатов через API: {str(e)}")
+        time.sleep(300)  # Проверяем каждые 5 минут
+
+# API для получения данных пользователя
+@app.route('/api/user', methods=['GET'])
 def get_user():
-    try:
-        steam_id = request.args.get('steam_id')
-        if not steam_id:
-            logging.error("Missing steam_id in /api/user")
-            return "Missing steam_id", 400
-        
-        response = supabase.table('users').select('*').eq('steam_id', steam_id).execute()
-        if response.data:
-            user = response.data[0]
-            user_data = {
-                'balance': user.get('balance', 0),
-                'inventory': user.get('inventory', []),
-                'sales_history': user.get('sales_history', [])
-            }
-            logging.info(f"Данные пользователя для {steam_id}: {user_data}")
-            return jsonify(user_data)
-        else:
-            logging.warning(f"Пользователь не найден: {steam_id}")
-            return "User not found", 404
-    except Exception as e:
-        logging.error(f"Ошибка в /api/user: {str(e)}")
-        return f"Ошибка: {str(e)}", 500
+    steam_id = request.args.get('steam_id')
+    if not steam_id:
+        return {"error": "SteamID не указан"}, 400
 
-@app.route('/api/user/update', methods=['POST'])
-def update_user():
-    try:
-        data = request.get_json()
-        steam_id = data.get('steam_id')
-        if not steam_id:
-            logging.error("Missing steam_id in /api/user/update")
-            return "Missing steam_id", 400
-        
-        update_data = {}
-        if 'balance' in data:
-            update_data['balance'] = data['balance']
-        if 'inventory' in data:
-            update_data['inventory'] = data['inventory']
-        if 'sales_history' in data:
-            update_data['sales_history'] = data['sales_history']
-        
-        if update_data:
-            supabase.table('users').update(update_data).eq('steam_id', steam_id).execute()
-            logging.info(f"Данные обновлены для {steam_id}: {update_data}")
-        else:
-            logging.warning("Нет данных для обновления")
-        
-        return "User updated", 200
-    except Exception as e:
-        logging.error(f"Ошибка в /api/user/update: {str(e)}")
-        return f"Ошибка: {str(e)}", 500
-
-@app.route('/api/send-to-steam', methods=['POST'])
-def send_to_steam():
-    try:
-        data = request.get_json()
-        steam_id = data.get('steam_id')
-        trade_url = data.get('trade_url')
-        item = data.get('item')
-        if not steam_id or not trade_url or not item:
-            logging.error("Missing required fields in /api/send-to-steam")
-            return "Missing required fields", 400
-        
-        logging.info(f"Отправка предмета {item['name']} для {steam_id}")
-        return "Trade offer sent (placeholder)", 200
-    except Exception as e:
-        logging.error(f"Ошибка в /api/send-to-steam: {str(e)}")
-        return f"Ошибка: {str(e)}", 500
-
-if __name__ == '__main__':
-    init_donation_alerts()  # Запускаем DonationAlerts WebSocket
-    if os.environ.get('FLASK_ENV') == 'development':
-        socketio.run(app, host='0.0.0.0', port=int(os.environ.get('PORT', 8000)))
+    response = supabase.table('users').select('*').eq('steam_id', steam_id).execute()
+    if response.data:
+        user_data = response.data[0]
+        logging.info(f"Данные пользователя для {steam_id}: {user_data}")
+        return user_data, 200
     else:
-        logging.info("Запуск через gunicorn в продакшене")
+        return {"error": "Пользователь не найден"}, 404
+
+# Запускаем фоновую задачу для опроса донатов
+Thread(target=poll_donations, daemon=True).start()
+
+# Запуск приложения
+if __name__ == "__main__":
+    socketio.run(app, host='0.0.0.0', port=10000)
