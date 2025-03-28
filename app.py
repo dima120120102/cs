@@ -23,8 +23,8 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 logging.info("Supabase клиент успешно инициализирован")
 
 # Настройки DonationAlerts OAuth
-CLIENT_ID = "ваш_client_id"  # Замените на ваш client_id
-CLIENT_SECRET = "ваш_client_secret"  # Замените на ваш client_secret
+CLIENT_ID = "14690"  # Замените на ваш client_id
+CLIENT_SECRET = "YIJUslJ5md0wvPfQK8D0dIop3faLh54dWCAcoWZB"  # Замените на ваш client_secret
 REDIRECT_URI = "https://cs2cases.onrender.com/oauth/callback"
 DA_AUTH_URL = "https://www.donationalerts.com/oauth/authorize"
 DA_TOKEN_URL = "https://www.donationalerts.com/oauth/token"
@@ -290,6 +290,41 @@ def get_user():
     else:
         return {"error": "Пользователь не найден"}, 404
 
+# API для обновления данных пользователя
+@app.route('/api/user/update', methods=['POST'])
+def update_user():
+    data = request.get_json()
+    steam_id = data.get('steam_id')
+    balance = data.get('balance')
+    inventory = data.get('inventory')
+    sales_history = data.get('sales_history')
+
+    if not steam_id:
+        return {"error": "SteamID не указан"}, 400
+
+    try:
+        # Проверяем, существует ли пользователь
+        response = supabase.table('users').select('*').eq('steam_id', steam_id).execute()
+        if not response.data:
+            return {"error": "Пользователь не найден"}, 404
+
+        # Обновляем данные
+        update_data = {}
+        if balance is not None:
+            update_data['balance'] = int(balance)  # Убедимся, что balance — целое число
+        if inventory is not None:
+            update_data['inventory'] = inventory
+        if sales_history is not None:
+            update_data['sales_history'] = sales_history
+
+        supabase.table('users').update(update_data).eq('steam_id', steam_id).execute()
+        logging.info(f"Данные пользователя {steam_id} обновлены")
+        socketio.emit('balance_update', {'steam_id': steam_id, 'balance': balance})
+        return {"message": "Данные обновлены"}, 200
+    except Exception as e:
+        logging.error(f"Ошибка обновления данных пользователя: {str(e)}")
+        return {"error": str(e)}, 500
+
 # API для добавления предмета в инвентарь
 @app.route('/api/inventory/add', methods=['POST'])
 def add_inventory_item():
@@ -298,9 +333,10 @@ def add_inventory_item():
     item_name = data.get('item_name')
     item_type = data.get('item_type')
     price = data.get('price')
+    image = data.get('image')  # Добавляем поле для изображения
 
-    if not all([steam_id, item_name, item_type, price]):
-        return {"error": "Все поля (steam_id, item_name, item_type, price) обязательны"}, 400
+    if not all([steam_id, item_name, item_type, price, image]):
+        return {"error": "Все поля (steam_id, item_name, item_type, price, image) обязательны"}, 400
 
     try:
         # Получаем текущий инвентарь пользователя
@@ -310,13 +346,14 @@ def add_inventory_item():
 
         current_inventory = response.data[0]['inventory'] or []
         
-        # Генерируем уникальный ID для предмета (просто увеличиваем на 1 от максимального ID)
+        # Генерируем уникальный ID для предмета
         max_id = max([item.get('id', 0) for item in current_inventory], default=0)
         new_item = {
             'id': max_id + 1,
-            'item_name': item_name,
-            'item_type': item_type,
+            'name': item_name,  # Используем "name" вместо "item_name" для соответствия фронтенду
+            'type': item_type,
             'price': int(price),  # Используем int, так как balance — int4
+            'image': image,
             'status': 'available'
         }
 
@@ -329,92 +366,44 @@ def add_inventory_item():
         logging.error(f"Ошибка добавления предмета: {str(e)}")
         return {"error": str(e)}, 500
 
-# API для получения инвентаря пользователя
-@app.route('/api/inventory', methods=['GET'])
-def get_inventory():
-    steam_id = request.args.get('steam_id')
-    if not steam_id:
-        return {"error": "SteamID не указан"}, 400
-
-    response = supabase.table('users').select('inventory').eq('steam_id', steam_id).execute()
-    if response.data:
-        inventory = response.data[0]['inventory'] or []
-        # Фильтруем только доступные предметы
-        available_inventory = [item for item in inventory if item.get('status') == 'available']
-        logging.info(f"Инвентарь для {steam_id}: {available_inventory}")
-        return {"inventory": available_inventory}, 200
-    return {"inventory": []}, 200
-
-# API для продажи предмета
-@app.route('/api/inventory/sell', methods=['POST'])
-def sell_item():
+# API для отправки предмета в Steam (заглушка)
+@app.route('/api/send-to-steam', methods=['POST'])
+def send_to_steam():
     data = request.get_json()
-    item_id = data.get('item_id')
     steam_id = data.get('steam_id')
-    amount = data.get('amount')
+    trade_url = data.get('trade_url')
+    item = data.get('item')
 
-    if not all([item_id, steam_id, amount]):
-        return {"error": "Все поля (item_id, steam_id, amount) обязательны"}, 400
+    if not all([steam_id, trade_url, item]):
+        return {"error": "Все поля (steam_id, trade_url, item) обязательны"}, 400
 
     try:
-        # Получаем текущие данные пользователя
-        user_response = supabase.table('users').select('inventory', 'balance', 'sales_history').eq('steam_id', steam_id).execute()
-        if not user_response.data:
+        # Проверяем, существует ли пользователь
+        response = supabase.table('users').select('inventory').eq('steam_id', steam_id).execute()
+        if not response.data:
             return {"error": "Пользователь не найден"}, 404
 
-        user_data = user_response.data[0]
-        inventory = user_data['inventory'] or []
-        sales_history = user_data['sales_history'] or []
-        balance = user_data['balance']
-
-        # Ищем предмет в инвентаре
+        inventory = response.data[0]['inventory'] or []
         item_found = False
-        for item in inventory:
-            if item['id'] == item_id and item['status'] == 'available':
-                item['status'] = 'sold'
+        for inv_item in inventory:
+            if inv_item['id'] == item['id'] and inv_item['status'] == 'available':
+                inv_item['status'] = 'sent'
                 item_found = True
                 break
 
         if not item_found:
-            return {"error": "Предмет не найден или уже продан"}, 404
+            return {"error": "Предмет не найден или уже отправлен"}, 404
 
-        # Обновляем баланс
-        new_balance = balance + int(amount)  # Используем int
-        # Добавляем запись в историю продаж
-        sale_record = {
-            'item_id': item_id,
-            'amount': int(amount),
-            'sold_at': time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())
-        }
-        sales_history.append(sale_record)
+        # Обновляем инвентарь
+        supabase.table('users').update({'inventory': inventory}).eq('steam_id', steam_id).execute()
 
-        # Обновляем данные пользователя
-        supabase.table('users').update({
-            'inventory': inventory,
-            'balance': new_balance,
-            'sales_history': sales_history
-        }).eq('steam_id', steam_id).execute()
-
-        logging.info(f"Предмет {item_id} продан за {amount} руб. пользователем {steam_id}")
-        socketio.emit('balance_update', {'steam_id': steam_id, 'balance': new_balance})
-        return {"message": "Предмет продан", "new_balance": new_balance}, 200
+        # Здесь должна быть реальная интеграция с Steam Trade API
+        # Для примера просто логируем
+        logging.info(f"Предмет {item['name']} отправлен в Steam для {steam_id} по Trade URL: {trade_url}")
+        return {"message": "Предмет отправлен в Steam"}, 200
     except Exception as e:
-        logging.error(f"Ошибка при продаже предмета: {str(e)}")
+        logging.error(f"Ошибка отправки предмета в Steam: {str(e)}")
         return {"error": str(e)}, 500
-
-# API для получения истории продаж
-@app.route('/api/sales', methods=['GET'])
-def get_sales():
-    steam_id = request.args.get('steam_id')
-    if not steam_id:
-        return {"error": "SteamID не указан"}, 400
-
-    response = supabase.table('users').select('sales_history').eq('steam_id', steam_id).execute()
-    if response.data:
-        sales_history = response.data[0]['sales_history'] or []
-        logging.info(f"История продаж для {steam_id}: {sales_history}")
-        return {"sales": sales_history}, 200
-    return {"sales": []}, 200
 
 # Запуск приложения
 if __name__ == "__main__":
