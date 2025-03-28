@@ -2,7 +2,7 @@ import os
 import logging
 import json
 import requests
-from flask import Flask, request, redirect, url_for
+from flask import Flask, request, redirect, url_for, jsonify
 from flask_socketio import SocketIO
 from supabase import create_client, Client
 from threading import Thread
@@ -23,8 +23,8 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 logging.info("Supabase клиент успешно инициализирован")
 
 # Настройки DonationAlerts OAuth
-CLIENT_ID = "14690"  # Замените на ваш client_id
-CLIENT_SECRET = "YIJUslJ5md0wvPfQK8D0dIop3faLh54dWCAcoWZB"  # Замените на ваш client_secret
+CLIENT_ID = "ваш_client_id"  # Замените на ваш client_id
+CLIENT_SECRET = "ваш_client_secret"  # Замените на ваш client_secret
 REDIRECT_URI = "https://cs2cases.onrender.com/oauth/callback"
 DA_AUTH_URL = "https://www.donationalerts.com/oauth/authorize"
 DA_TOKEN_URL = "https://www.donationalerts.com/oauth/token"
@@ -35,14 +35,18 @@ access_token = None
 
 # Функция для сохранения refresh_token в Supabase
 def save_refresh_token(refresh_token):
-    # Проверяем, есть ли уже запись
     response = supabase.table('tokens').select('*').eq('id', 1).execute()
     if response.data:
-        # Обновляем существующую запись
-        supabase.table('tokens').update({'refresh_token': refresh_token}).eq('id', 1).execute()
+        supabase.table('tokens').update({
+            'refresh_token': refresh_token,
+            'updated_at': 'now()'
+        }).eq('id', 1).execute()
     else:
-        # Создаём новую запись
-        supabase.table('tokens').insert({'id': 1, 'refresh_token': refresh_token}).execute()
+        supabase.table('tokens').insert({
+            'id': 1,
+            'refresh_token': refresh_token,
+            'updated_at': 'now()'
+        }).execute()
     logging.info("refresh_token сохранён в Supabase")
 
 # Функция для получения refresh_token из Supabase
@@ -67,7 +71,6 @@ def oauth_login():
 def oauth_callback():
     global access_token
     try:
-        # Проверяем наличие параметра code
         code = request.args.get('code')
         if not code:
             logging.error("Параметр 'code' отсутствует в запросе")
@@ -75,7 +78,6 @@ def oauth_callback():
 
         logging.info(f"Получен код авторизации: {code}")
 
-        # Обмен кода на access_token
         token_data = {
             "client_id": CLIENT_ID,
             "client_secret": CLIENT_SECRET,
@@ -90,7 +92,6 @@ def oauth_callback():
             logging.error(f"Ошибка получения токена: {response.status_code} - {response.text}")
             return "Ошибка получения токена", 500
 
-        # Парсим ответ
         try:
             token_response = response.json()
         except ValueError as e:
@@ -106,14 +107,12 @@ def oauth_callback():
 
         logging.info(f"Получен access_token: {access_token}")
 
-        # Сохраняем refresh_token в Supabase
         try:
             save_refresh_token(refresh_token)
         except Exception as e:
             logging.error(f"Ошибка сохранения refresh_token в Supabase: {str(e)}")
             return "Ошибка сохранения refresh_token", 500
 
-        # Инициируем WebSocket-соединение
         init_donation_alerts()
         return "Авторизация успешна. Теперь сервер может получать донаты."
 
@@ -121,7 +120,7 @@ def oauth_callback():
         logging.error(f"Необработанная ошибка в /oauth/callback: {str(e)}")
         return f"Произошла ошибка: {str(e)}", 500
 
-# Функция для обновления access_token с помощью refresh_token
+# Функция для обновления access_token
 def refresh_access_token():
     global access_token
     refresh_token = get_refresh_token()
@@ -144,10 +143,21 @@ def refresh_access_token():
     access_token = token_response.get("access_token")
     new_refresh_token = token_response.get("refresh_token")
     logging.info(f"Токен обновлен: {access_token}")
-
-    # Обновляем refresh_token в Supabase
     save_refresh_token(new_refresh_token)
     return True
+
+# Функция для сохранения доната
+def save_donation(steam_id, amount, currency):
+    try:
+        supabase.table('donations').insert({
+            'steam_id': steam_id,
+            'amount': amount,
+            'currency': currency,
+            'created_at': 'now()'
+        }).execute()
+        logging.info(f"Донат сохранён: {steam_id}, {amount} {currency}")
+    except Exception as e:
+        logging.error(f"Ошибка сохранения доната: {str(e)}")
 
 # Инициализация WebSocket-соединения с DonationAlerts
 def init_donation_alerts():
@@ -171,13 +181,15 @@ def init_donation_alerts():
                 logging.warning("SteamID не указан в имени доната")
                 return
             
-            amount = float(donation['amount'])
+            amount = int(donation['amount'])  # Используем int, так как balance — int4
             currency = donation['currency']
             amount_in_rub = amount
             if currency != 'RUB':
                 rates = {'USD': 90, 'EUR': 100}
                 amount_in_rub = amount * rates.get(currency, 1)
                 logging.info(f"Конвертация: {amount} {currency} -> {amount_in_rub} RUB")
+
+            save_donation(steam_id, amount_in_rub, currency)
 
             response = supabase.table('users').select('balance').eq('steam_id', steam_id).execute()
             if response.data:
@@ -186,7 +198,14 @@ def init_donation_alerts():
                 logging.info(f"Баланс обновлен для {steam_id}: {new_balance}")
                 socketio.emit('balance_update', {'steam_id': steam_id, 'balance': new_balance})
             else:
-                logging.warning(f"Пользователь с SteamID {steam_id} не найден в базе")
+                supabase.table('users').insert({
+                    'steam_id': steam_id,
+                    'balance': amount_in_rub,
+                    'inventory': [],
+                    'sales_history': []
+                }).execute()
+                logging.info(f"Создан пользователь {steam_id} с балансом {amount_in_rub}")
+                socketio.emit('balance_update', {'steam_id': steam_id, 'balance': amount_in_rub})
         except Exception as e:
             logging.error(f"Ошибка при обработке доната: {str(e)}")
 
@@ -198,7 +217,6 @@ def init_donation_alerts():
     def on_disconnect():
         logging.info("Отключено от DonationAlerts")
 
-    # Запускаем фоновую задачу для опроса донатов
     Thread(target=poll_donations, daemon=True).start()
 
 # Резервный способ опроса донатов через API
@@ -213,7 +231,7 @@ def poll_donations():
 
             headers = {'Authorization': f'Bearer {access_token}'}
             response = requests.get('https://www.donationalerts.com/api/v1/alerts/donations', headers=headers)
-            if response.status_code == 401:  # Токен истёк
+            if response.status_code == 401:
                 if refresh_access_token():
                     continue
                 else:
@@ -229,12 +247,14 @@ def poll_donations():
                     logging.warning("SteamID не указан в имени доната (API)")
                     continue
                 
-                amount = float(donation['amount'])
+                amount = int(donation['amount'])  # Используем int
                 currency = donation['currency']
                 amount_in_rub = amount
                 if currency != 'RUB':
                     rates = {'USD': 90, 'EUR': 100}
                     amount_in_rub = amount * rates.get(currency, 1)
+
+                save_donation(steam_id, amount_in_rub, currency)
 
                 response = supabase.table('users').select('balance').eq('steam_id', steam_id).execute()
                 if response.data:
@@ -242,9 +262,18 @@ def poll_donations():
                     supabase.table('users').update({'balance': new_balance}).eq('steam_id', steam_id).execute()
                     logging.info(f"Баланс обновлен для {steam_id} (API): {new_balance}")
                     socketio.emit('balance_update', {'steam_id': steam_id, 'balance': new_balance})
+                else:
+                    supabase.table('users').insert({
+                        'steam_id': steam_id,
+                        'balance': amount_in_rub,
+                        'inventory': [],
+                        'sales_history': []
+                    }).execute()
+                    logging.info(f"Создан пользователь {steam_id} с балансом {amount_in_rub} (API)")
+                    socketio.emit('balance_update', {'steam_id': steam_id, 'balance': amount_in_rub})
         except Exception as e:
             logging.error(f"Ошибка при опросе донатов через API: {str(e)}")
-        time.sleep(300)  # Проверяем каждые 5 минут
+        time.sleep(300)
 
 # API для получения данных пользователя
 @app.route('/api/user', methods=['GET'])
@@ -260,6 +289,132 @@ def get_user():
         return user_data, 200
     else:
         return {"error": "Пользователь не найден"}, 404
+
+# API для добавления предмета в инвентарь
+@app.route('/api/inventory/add', methods=['POST'])
+def add_inventory_item():
+    data = request.get_json()
+    steam_id = data.get('steam_id')
+    item_name = data.get('item_name')
+    item_type = data.get('item_type')
+    price = data.get('price')
+
+    if not all([steam_id, item_name, item_type, price]):
+        return {"error": "Все поля (steam_id, item_name, item_type, price) обязательны"}, 400
+
+    try:
+        # Получаем текущий инвентарь пользователя
+        response = supabase.table('users').select('inventory').eq('steam_id', steam_id).execute()
+        if not response.data:
+            return {"error": "Пользователь не найден"}, 404
+
+        current_inventory = response.data[0]['inventory'] or []
+        
+        # Генерируем уникальный ID для предмета (просто увеличиваем на 1 от максимального ID)
+        max_id = max([item.get('id', 0) for item in current_inventory], default=0)
+        new_item = {
+            'id': max_id + 1,
+            'item_name': item_name,
+            'item_type': item_type,
+            'price': int(price),  # Используем int, так как balance — int4
+            'status': 'available'
+        }
+
+        # Добавляем новый предмет в инвентарь
+        current_inventory.append(new_item)
+        supabase.table('users').update({'inventory': current_inventory}).eq('steam_id', steam_id).execute()
+        logging.info(f"Предмет добавлен в инвентарь: {item_name} для {steam_id}")
+        return {"message": "Предмет добавлен", "item": new_item}, 201
+    except Exception as e:
+        logging.error(f"Ошибка добавления предмета: {str(e)}")
+        return {"error": str(e)}, 500
+
+# API для получения инвентаря пользователя
+@app.route('/api/inventory', methods=['GET'])
+def get_inventory():
+    steam_id = request.args.get('steam_id')
+    if not steam_id:
+        return {"error": "SteamID не указан"}, 400
+
+    response = supabase.table('users').select('inventory').eq('steam_id', steam_id).execute()
+    if response.data:
+        inventory = response.data[0]['inventory'] or []
+        # Фильтруем только доступные предметы
+        available_inventory = [item for item in inventory if item.get('status') == 'available']
+        logging.info(f"Инвентарь для {steam_id}: {available_inventory}")
+        return {"inventory": available_inventory}, 200
+    return {"inventory": []}, 200
+
+# API для продажи предмета
+@app.route('/api/inventory/sell', methods=['POST'])
+def sell_item():
+    data = request.get_json()
+    item_id = data.get('item_id')
+    steam_id = data.get('steam_id')
+    amount = data.get('amount')
+
+    if not all([item_id, steam_id, amount]):
+        return {"error": "Все поля (item_id, steam_id, amount) обязательны"}, 400
+
+    try:
+        # Получаем текущие данные пользователя
+        user_response = supabase.table('users').select('inventory', 'balance', 'sales_history').eq('steam_id', steam_id).execute()
+        if not user_response.data:
+            return {"error": "Пользователь не найден"}, 404
+
+        user_data = user_response.data[0]
+        inventory = user_data['inventory'] or []
+        sales_history = user_data['sales_history'] or []
+        balance = user_data['balance']
+
+        # Ищем предмет в инвентаре
+        item_found = False
+        for item in inventory:
+            if item['id'] == item_id and item['status'] == 'available':
+                item['status'] = 'sold'
+                item_found = True
+                break
+
+        if not item_found:
+            return {"error": "Предмет не найден или уже продан"}, 404
+
+        # Обновляем баланс
+        new_balance = balance + int(amount)  # Используем int
+        # Добавляем запись в историю продаж
+        sale_record = {
+            'item_id': item_id,
+            'amount': int(amount),
+            'sold_at': time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())
+        }
+        sales_history.append(sale_record)
+
+        # Обновляем данные пользователя
+        supabase.table('users').update({
+            'inventory': inventory,
+            'balance': new_balance,
+            'sales_history': sales_history
+        }).eq('steam_id', steam_id).execute()
+
+        logging.info(f"Предмет {item_id} продан за {amount} руб. пользователем {steam_id}")
+        socketio.emit('balance_update', {'steam_id': steam_id, 'balance': new_balance})
+        return {"message": "Предмет продан", "new_balance": new_balance}, 200
+    except Exception as e:
+        logging.error(f"Ошибка при продаже предмета: {str(e)}")
+        return {"error": str(e)}, 500
+
+# API для получения истории продаж
+@app.route('/api/sales', methods=['GET'])
+def get_sales():
+    steam_id = request.args.get('steam_id')
+    if not steam_id:
+        return {"error": "SteamID не указан"}, 400
+
+    response = supabase.table('users').select('sales_history').eq('steam_id', steam_id).execute()
+    if response.data:
+        sales_history = response.data[0]['sales_history'] or []
+        logging.info(f"История продаж для {steam_id}: {sales_history}")
+        return {"sales": sales_history}, 200
+    return {"sales": []}, 200
 
 # Запуск приложения
 if __name__ == "__main__":
