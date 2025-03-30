@@ -2,11 +2,16 @@ import os
 import logging
 import json
 import requests
-from flask import Flask, request, redirect, url_for, jsonify
+from flask import Flask, request, redirect, url_for, jsonify, session
 from flask_socketio import SocketIO
 from supabase import create_client, Client
 from threading import Thread
 import time
+from authlib.integrations.flask_client import OAuth
+from dotenv import load_dotenv
+
+# Загружаем переменные из .env
+load_dotenv()
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -17,14 +22,14 @@ app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY', 'a1b2c3d4e5f6g7h8i9j0k1
 socketio = SocketIO(app, cors_allowed_origins="https://cq34195.tw1.ru", logger=True, engineio_logger=True)
 
 # Инициализация Supabase
-SUPABASE_URL = "https://gxeviitquermnukavhvj.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd4ZXZpaXRxdWVybW51a2F2aHZqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Mjg5OTU5MDcsImV4cCI6MjA0NDU3MTkwN30.-I6lWJwDi6zTzzXh0gT6W2iM7nW9K2x2L2x2L2x2L2w"
+SUPABASE_URL = os.getenv('SUPABASE_URL', 'https://gxeviitquermnukavhvj.supabase.co')
+SUPABASE_KEY = os.getenv('SUPABASE_KEY', 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd4ZXZpaXRxdWVybW51a2F2aHZqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Mjg5OTU5MDcsImV4cCI6MjA0NDU3MTkwN30.-I6lWJwDi6zTzzXh0gT6W2iM7nW9K2x2L2x2L2x2L2w')
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 logging.info("Supabase клиент успешно инициализирован")
 
 # Настройки DonationAlerts OAuth
-CLIENT_ID = "14690"  # Замените на ваш client_id
-CLIENT_SECRET = "YIJUslJ5md0wvPfQK8D0dIop3faLh54dWCAcoWZB"  # Замените на ваш client_secret
+CLIENT_ID = os.getenv('CLIENT_ID', 'ваш_client_id')
+CLIENT_SECRET = os.getenv('CLIENT_SECRET', 'ваш_client_secret')
 REDIRECT_URI = "https://cs2cases.onrender.com/oauth/callback"
 DA_AUTH_URL = "https://www.donationalerts.com/oauth/authorize"
 DA_TOKEN_URL = "https://www.donationalerts.com/oauth/token"
@@ -32,6 +37,69 @@ DA_WS_URL = "wss://socket.donationalerts.ru:443"
 
 # Переменная для хранения access_token
 access_token = None
+
+# Настройки Steam OpenID
+STEAM_REDIRECT_URI = "https://cs2cases.onrender.com/auth/steam/callback"
+
+# Инициализация OAuth для Steam
+oauth = OAuth(app)
+steam = oauth.register(
+    name='steam',
+    client_id=None,  # OpenID не требует client_id
+    client_secret=None,  # OpenID не требует client_secret
+    access_token_url=None,
+    authorize_url='https://steamcommunity.com/openid/login',
+    authorize_params={
+        'openid.ns': 'http://specs.openid.net/auth/2.0',
+        'openid.mode': 'checkid_setup',
+        'openid.return_to': STEAM_REDIRECT_URI,
+        'openid.realm': 'https://cs2cases.onrender.com',
+        'openid.identity': 'http://specs.openid.net/auth/2.0/identifier_select',
+        'openid.claimed_id': 'http://specs.openid.net/auth/2.0/identifier_select',
+    },
+    client_kwargs={'scope': 'openid'},
+)
+
+# Маршрут для входа через Steam
+@app.route('/auth/steam')
+def login_steam():
+    return steam.authorize_redirect(STEAM_REDIRECT_URI)
+
+# Маршрут для обработки callback от Steam
+@app.route('/auth/steam/callback')
+def steam_callback():
+    try:
+        # Проверяем параметры OpenID
+        params = request.args.to_dict()
+        if 'openid.mode' not in params or params['openid.mode'] != 'id_res':
+            return "Ошибка авторизации через Steam", 400
+
+        # Извлекаем SteamID из openid.identity
+        identity = params.get('openid.identity', '')
+        steam_id = identity.split('/')[-1] if identity else None
+        if not steam_id:
+            return "Не удалось получить SteamID", 400
+
+        # Сохраняем SteamID в сессии
+        session['steam_id'] = steam_id
+
+        # Проверяем, есть ли пользователь в базе данных
+        response = supabase.table('users').select('*').eq('steam_id', steam_id).execute()
+        if not response.data:
+            # Создаём нового пользователя
+            supabase.table('users').insert({
+                'steam_id': steam_id,
+                'balance': 0,
+                'inventory': [],
+                'sales_history': []
+            }).execute()
+            logging.info(f"Создан новый пользователь: {steam_id}")
+
+        # Перенаправляем на страницу профиля с параметром steam_id
+        return redirect(f'/profile.html?steam_id={steam_id}')
+    except Exception as e:
+        logging.error(f"Ошибка авторизации через Steam: {str(e)}")
+        return f"Произошла ошибка: {str(e)}", 500
 
 # Функция для сохранения refresh_token в Supabase
 def save_refresh_token(refresh_token):
@@ -56,7 +124,7 @@ def get_refresh_token():
         return response.data[0]['refresh_token']
     return None
 
-# Маршрут для начала авторизации
+# Маршрут для начала авторизации DonationAlerts
 @app.route('/oauth/login')
 def oauth_login():
     auth_url = (
@@ -66,7 +134,7 @@ def oauth_login():
     logging.info(f"Перенаправление на авторизацию: {auth_url}")
     return redirect(auth_url)
 
-# Маршрут для обработки callback после авторизации
+# Маршрут для обработки callback после авторизации DonationAlerts
 @app.route('/oauth/callback')
 def oauth_callback():
     global access_token
@@ -288,7 +356,24 @@ def get_user():
         logging.info(f"Данные пользователя для {steam_id}: {user_data}")
         return user_data, 200
     else:
-        return {"error": "Пользователь не найден"}, 404
+        # Если пользователь не найден, создаём его
+        try:
+            supabase.table('users').insert({
+                'steam_id': steam_id,
+                'balance': 0,
+                'inventory': [],
+                'sales_history': []
+            }).execute()
+            logging.info(f"Создан новый пользователь: {steam_id}")
+            return {
+                'steam_id': steam_id,
+                'balance': 0,
+                'inventory': [],
+                'sales_history': []
+            }, 200
+        except Exception as e:
+            logging.error(f"Ошибка создания пользователя: {str(e)}")
+            return {"error": "Не удалось создать пользователя"}, 500
 
 # API для обновления данных пользователя
 @app.route('/api/user/update', methods=['POST'])
@@ -407,4 +492,5 @@ def send_to_steam():
 
 # Запуск приложения
 if __name__ == "__main__":
-    socketio.run(app, host='0.0.0.0', port=10000)
+    port = int(os.getenv('PORT', 10000))  # Используем PORT из .env или 10000 по умолчанию
+    socketio.run(app, host='0.0.0.0', port=port)
