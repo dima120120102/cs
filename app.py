@@ -34,7 +34,7 @@ except Exception as e:
 
 # YooMoney конфигурация
 YOOMONEY_TOKEN = None  # Изначально None, будет заполнен через OAuth2 или вручную
-YOOMONEY_CLIENT_ID = "**********************************************************8CB67F74894240C8AC76"
+YOOMONEY_CLIENT_ID = "5D57E13F8ADEBA157A38E3D584C557026397D65F5D0A8CB67F74894240C8AC76"
 YOOMONEY_REDIRECT_URI = "https://cs2cases.onrender.com/yoomoney/callback"
 YOOMONEY_API_URL = "https://api.yoomoney.ru/v1/operation-history"
 
