@@ -4,7 +4,7 @@ import logging
 import gevent
 from gevent import monkey
 
-# Применяем патч для поддержки асинхронных операций
+# Применяем патч для асинхронных операций
 monkey.patch_all()
 
 from urllib.parse import urlencode, parse_qs, urlparse
@@ -18,18 +18,13 @@ import requests
 logging.basicConfig(level=logging.INFO)
 
 app = Flask(__name__)
-
-# Настройка SocketIO с gevent
 socketio = SocketIO(app, async_mode='gevent', cors_allowed_origins="*")
-
-# Настройка CORS
 CORS(app, resources={r"/api/*": {"origins": "https://cq34195.tw1.ru"}})
 
 # Supabase конфигурация
 SUPABASE_URL = "https://gxeviitquermnukavhvj.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd4ZXZpaXRxdWVybW51a2F2aHZqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDI4MjY5NjgsImV4cCI6MjA1ODQwMjk2OH0.FOZnKiCzhL1UPVzOttN4RhFtrkplamHho6flpibdCx8"
 
-# Инициализация Supabase клиента с обработкой ошибок
 try:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
     logging.info("Supabase клиент успешно инициализирован")
@@ -37,64 +32,128 @@ except Exception as e:
     logging.error(f"Ошибка инициализации Supabase клиента: {str(e)}")
     raise
 
-# DonationAlerts токен
-DA_TOKEN = "6q26Pn5jJN7iWFuL3SPf"
+# YooMoney конфигурация
+YOOMONEY_TOKEN = None  # Изначально None, будет заполнен через OAuth2 или вручную
+YOOMONEY_CLIENT_ID = "**********************************************************8CB67F74894240C8AC76"
+YOOMONEY_REDIRECT_URI = "https://cs2cases.onrender.com/yoomoney/callback"
+YOOMONEY_API_URL = "https://api.yoomoney.ru/v1/operation-history"
 
-# Инициализация WebSocket для DonationAlerts
-def init_donation_alerts():
-    @socketio.on('connect')
-    def on_connect():
-        logging.info("Подключено к DonationAlerts")
-        socketio.emit('add-user', {'token': DA_TOKEN, 'type': 'minor'})
+# Функция обработки доната
+def process_donation(steam_id, amount):
+    user = supabase.table('users').select('balance').eq('steam_id', steam_id).execute()
+    if user.data:
+        new_balance = user.data[0]['balance'] + amount
+        supabase.table('users').update({'balance': new_balance}).eq('steam_id', steam_id).execute()
+        socketio.emit('balance_update', {'steam_id': steam_id, 'balance': new_balance})
+        logging.info(f"Баланс обновлен: {steam_id} -> {new_balance}")
+    else:
+        logging.warning(f"Пользователь не найден: {steam_id}")
 
-    @socketio.on('donation')
-    def on_donation(data):
-        try:
-            donation = json.loads(data)
-            logging.info(f"Новый донат: {donation}")
+# Периодическая проверка через API
+def init_yoomoney_integration():
+    def check_transactions():
+        if not YOOMONEY_TOKEN:
+            logging.error("YOOMONEY_TOKEN не установлен, пропускаем проверку")
+            return
+        last_operation_id = None
+        while True:
+            try:
+                headers = {"Authorization": f"Bearer {YOOMONEY_TOKEN}"}
+                params = {"records": 10, "type": "deposition"}
+                response = requests.post(YOOMONEY_API_URL, headers=headers, params=params)
+                response.raise_for_status()
+                operations = response.json().get('operations', [])
 
-            # Предполагаем, что SteamID указан в имени доната
-            steam_id = donation.get('username')
-            if not steam_id:
-                logging.warning("SteamID не указан в имени доната")
-                return
+                for operation in operations:
+                    operation_id = operation.get('operation_id')
+                    if last_operation_id and operation_id == last_operation_id:
+                        continue
+                    steam_id = operation.get('message', '').strip()
+                    if not steam_id:
+                        logging.warning("SteamID не указан в комментарии")
+                        continue
+                    amount = float(operation.get('amount', 0))
+                    process_donation(steam_id, amount)
+                    last_operation_id = operation_id
+            except Exception as e:
+                logging.error(f"Ошибка при проверке YooMoney: {str(e)}")
+            gevent.sleep(60)
 
-            amount = float(donation['amount'])
-            currency = donation['currency']
+    socketio.start_background_task(check_transactions)
 
-            # Конвертация в рубли, если не RUB
-            amount_in_rub = amount
-            if currency != 'RUB':
-                rates = {'USD': 90, 'EUR': 100}  # Примерные курсы, замените на реальные
-                amount_in_rub = amount * rates.get(currency, 1)
+# Webhook от YooMoney
+@app.route('/yoomoney/webhook', methods=['POST'])
+def yoomoney_webhook():
+    try:
+        data = request.json
+        if not data:
+            logging.error("Webhook: Нет данных")
+            return "No data", 400
+        if data.get('notification_type') != 'p2p-incoming':
+            return "Not a donation", 200
+        steam_id = data.get('label', '').strip()
+        if not steam_id:
+            logging.warning("Webhook: SteamID не указан")
+            return "No SteamID", 200
+        amount = float(data.get('amount', 0))
+        process_donation(steam_id, amount)
+        return "OK", 200
+    except Exception as e:
+        logging.error(f"Ошибка в Webhook: {str(e)}")
+        return "Error", 500
 
-            # Обновляем баланс в Supabase
-            response = supabase.table('users').select('balance').eq('steam_id', steam_id).execute()
-            if response.data:
-                new_balance = response.data[0]['balance'] + amount_in_rub
-                supabase.table('users').update({'balance': new_balance}).eq('steam_id', steam_id).execute()
-                logging.info(f"Баланс обновлен для {steam_id}: {new_balance}")
-                
-                # Уведомляем фронтенд через SocketIO
-                socketio.emit('balance_update', {'steam_id': steam_id, 'balance': new_balance})
-            else:
-                logging.warning(f"Пользователь с SteamID {steam_id} не найден в базе")
-        except Exception as e:
-            logging.error(f"Ошибка при обработке доната: {str(e)}")
+# OAuth2 авторизация
+@app.route('/yoomoney/auth')
+def yoomoney_auth():
+    auth_url = "https://yoomoney.ru/oauth/authorize"
+    params = {
+        "client_id": YOOMONEY_CLIENT_ID,
+        "response_type": "code",
+        "redirect_uri": YOOMONEY_REDIRECT_URI,
+        "scope": "account-info operation-history"
+    }
+    redirect_url = f"{auth_url}?{urlencode(params)}"
+    return redirect(redirect_url)
 
-    @socketio.on('error')
-    def on_error(error):
-        logging.error(f"Ошибка WebSocket DonationAlerts: {error}")
+# Обработка Redirect URI
+@app.route('/yoomoney/callback')
+def yoomoney_callback():
+    try:
+        code = request.args.get('code')
+        if not code:
+            logging.error("OAuth2: Код авторизации не получен")
+            return "No authorization code", 400
 
-    @socketio.on('disconnect')
-    def on_disconnect():
-        logging.info("Отключено от DonationAlerts")
+        token_url = "https://yoomoney.ru/oauth/token"
+        payload = {
+            "code": code,
+            "client_id": YOOMONEY_CLIENT_ID,
+            "grant_type": "authorization_code",
+            "redirect_uri": YOOMONEY_REDIRECT_URI
+        }
+        response = requests.post(token_url, data=payload)
+        response.raise_for_status()
+        token_data = response.json()
+        access_token = token_data.get("access_token")
+
+        if access_token:
+            global YOOMONEY_TOKEN
+            YOOMONEY_TOKEN = access_token
+            logging.info(f"OAuth2: Токен успешно получен: {access_token}")
+            return "Токен получен! Можете закрыть эту страницу."
+        else:
+            logging.error("OAuth2: Не удалось получить токен")
+            return "Ошибка получения токена", 400
+    except Exception as e:
+        logging.error(f"Ошибка в OAuth2 callback: {str(e)}")
+        return f"Ошибка: {str(e)}", 500
 
 @app.route('/test')
 def test():
     logging.info("Маршрут /test вызван")
     return "Сервер работает!"
 
+# Остальные маршруты остаются без изменений
 @app.route('/login')
 def login():
     try:
@@ -220,7 +279,7 @@ def send_to_steam():
         return f"Ошибка: {str(e)}", 500
 
 if __name__ == '__main__':
-    init_donation_alerts()  # Запускаем DonationAlerts WebSocket
+    init_yoomoney_integration()
     if os.environ.get('FLASK_ENV') == 'development':
         socketio.run(app, host='0.0.0.0', port=int(os.environ.get('PORT', 8000)))
     else:
